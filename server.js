@@ -25,6 +25,10 @@ const db = new sqlite3.Database('./database.sqlite', (err) => {
             summary TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )`);
+        db.run(`CREATE TABLE IF NOT EXISTS feed_cache (
+            id INTEGER PRIMARY KEY,
+            data TEXT
+        )`);
     }
 });
 
@@ -43,11 +47,9 @@ try {
     if (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'sua_chave_api_aqui') {
         ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
         console.log("Integração com Gemini AI inicializada com sucesso.");
-    } else {
-        console.warn("AVISO: GEMINI_API_KEY não configurada no .env. Os resumos via IA não funcionarão.");
     }
 } catch (e) {
-    console.error("Erro ao importar @google/genai:", e.message);
+    console.error("Erro ao importar @google/genai");
 }
 
 const FEEDS = [
@@ -137,10 +139,15 @@ async function fetchRealImageFromUrl(url) {
     }
 }
 
+let cachedNews = [];
+let isFetching = false;
 const imageCache = new Map();
 
-app.get('/api/news', async (req, res) => {
+async function refreshNewsCache() {
+    if (isFetching) return;
+    isFetching = true;
     try {
+        console.log("Atualizando cache de notícias em background...");
         const feedPromises = FEEDS.map(async (feed) => {
             try {
                 const parsedFeed = await parser.parseURL(feed.url);
@@ -184,14 +191,41 @@ app.get('/api/news', async (req, res) => {
             return news;
         });
 
-        allNews = await Promise.all(imagePromises);
-        res.json({ status: 'ok', items: allNews });
+        cachedNews = await Promise.all(imagePromises);
+        
+        // Salva o JSON no banco SQLite para carregamento instantâneo se o Render reiniciar
+        db.run("INSERT OR REPLACE INTO feed_cache (id, data) VALUES (1, ?)", [JSON.stringify(cachedNews)]);
+        console.log("Cache atualizado com sucesso!");
     } catch (error) {
-        res.status(500).json({ status: 'error', message: 'Erro interno no servidor' });
+        console.error("Erro ao atualizar cache:", error.message);
+    } finally {
+        isFetching = false;
+    }
+}
+
+// Carrega dados do banco de dados na inicialização
+db.get("SELECT data FROM feed_cache WHERE id = 1", (err, row) => {
+    if (row && row.data) {
+        cachedNews = JSON.parse(row.data);
+        console.log("Notícias carregadas do SQLite quase instantaneamente.");
+    }
+    // Dispara a busca atualizada
+    refreshNewsCache();
+});
+
+// Atualiza o cache a cada 5 minutos
+setInterval(refreshNewsCache, 5 * 60 * 1000);
+
+app.get('/api/news', async (req, res) => {
+    if (cachedNews.length > 0) {
+        return res.json({ status: 'ok', items: cachedNews });
+    } else {
+        // Se ainda não carregou do SQLite nem da internet, espera carregar a primeira vez
+        await refreshNewsCache();
+        return res.json({ status: 'ok', items: cachedNews });
     }
 });
 
-// Promisify SQLite Get
 const getCachedSummary = (url) => new Promise((resolve, reject) => {
     db.get("SELECT summary FROM summaries WHERE url = ?", [url], (err, row) => {
         if (err) reject(err);
@@ -232,17 +266,12 @@ ${articleText}`;
                 contents: prompt,
             });
             summaryResult = aiResponse.text;
-            
-            // Tratamento caso a IA retorne markdown como ```html
             summaryResult = summaryResult.replace(/```html|```/g, '').trim();
-
         } else {
             summaryResult = `<ul><li>A IA não está configurada (Falta GEMINI_API_KEY).</li><li>Texto bruto extraído: ${articleText.substring(0, 200)}...</li></ul>`;
         }
 
-        // Salvar no SQLite para nunca mais gastar créditos com essa URL
         db.run("INSERT OR REPLACE INTO summaries (url, summary) VALUES (?, ?)", [targetUrl, summaryResult]);
-
         res.json({ summary: summaryResult, cached: false });
 
     } catch (error) {
@@ -252,5 +281,5 @@ ${articleText}`;
 });
 
 app.listen(PORT, () => {
-    console.log(`Backend rodando na porta ${PORT} com suporte a Banco de Dados e IA Nativa.`);
+    console.log(`Backend rodando na porta ${PORT} com caching ultra-rápido via SQLite.`);
 });
