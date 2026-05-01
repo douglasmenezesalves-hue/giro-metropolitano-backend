@@ -207,8 +207,8 @@ app.get('/api/summarize', async (req, res) => {
 
         if (ai) {
             const prompt = `Resuma os fatos principais desta notícia em tópicos curtos HTML (<ul><li>). Não use parágrafos nem markdown fora do HTML. Texto: ${articleText}`;
-            // Correção crucial: gemini-1.5-flash é o modelo estável garantido.
-            const aiResponse = await ai.models.generateContent({ model: 'gemini-1.5-flash', contents: prompt });
+            // Atualizando para o gemini-2.5-flash, que é o padrão suportado por chaves criadas em 2026
+            const aiResponse = await ai.models.generateContent({ model: 'gemini-2.5-flash', contents: prompt });
             summaryResult = aiResponse.text.replace(/```html|```/g, '').trim();
         } else {
             summaryResult = `<ul><li>A IA não está configurada (Falta GEMINI_API_KEY). Texto bruto: ${articleText.substring(0, 100)}...</li></ul>`;
