@@ -175,23 +175,19 @@ async function refreshNewsCache() {
         const results = await Promise.all(feedPromises);
         let allNews = results.flat().sort((a, b) => new Date(b.pubDate) - new Date(a.pubDate)).slice(0, 50);
         
-        const imagePromises = allNews.map(async (news) => {
-            if (news.image) return news;
-            if (imageCache.has(news.link)) {
-                news.image = imageCache.get(news.link);
-                return news;
+        cachedNews = [];
+        for (let news of allNews) {
+            if (!news.image) {
+                if (imageCache.has(news.link)) {
+                    news.image = imageCache.get(news.link);
+                } else {
+                    const realImg = await fetchRealImageFromUrl(news.link);
+                    news.image = realImg || 'https://images.unsplash.com/photo-1495020689067-958852a7765e?q=80&w=600&auto=format&fit=crop';
+                    if (realImg) imageCache.set(news.link, realImg);
+                }
             }
-            const realImg = await fetchRealImageFromUrl(news.link);
-            if (realImg) {
-                news.image = realImg;
-                imageCache.set(news.link, realImg);
-            } else {
-                news.image = 'https://images.unsplash.com/photo-1495020689067-958852a7765e?q=80&w=600&auto=format&fit=crop';
-            }
-            return news;
-        });
-
-        cachedNews = await Promise.all(imagePromises);
+            cachedNews.push(news);
+        }
         
         // Salva o JSON no banco SQLite para carregamento instantâneo se o Render reiniciar
         db.run("INSERT OR REPLACE INTO feed_cache (id, data) VALUES (1, ?)", [JSON.stringify(cachedNews)]);
