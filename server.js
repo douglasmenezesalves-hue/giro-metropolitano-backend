@@ -178,29 +178,49 @@ app.get('/api/summarize', async (req, res) => {
             return res.json({ summary: MEMORY_DB_SUMMARIES[targetUrl], cached: true });
         }
 
-        const response = await axios.get(targetUrl, { timeout: 8000, headers: { 'User-Agent': 'Mozilla/5.0' } });
-        const dom = new JSDOM(response.data, { url: targetUrl });
-        const reader = new Readability(dom.window.document);
-        const article = reader.parse();
+        let articleText = '';
+        
+        try {
+            // Tenta raspar a página completa
+            const response = await axios.get(targetUrl, { timeout: 6000, headers: { 'User-Agent': 'Mozilla/5.0' } });
+            const dom = new JSDOM(response.data, { url: targetUrl });
+            const reader = new Readability(dom.window.document);
+            const article = reader.parse();
+            if (article && article.textContent) {
+                articleText = article.textContent.trim();
+            }
+        } catch (scrapeErr) {
+            console.warn(`Portal bloqueou a raspagem para ${targetUrl}. Usando descrição de fallback.`);
+        }
 
-        if (!article || !article.textContent) return res.status(500).json({ error: 'Falha ao ler o texto.' });
+        // Fallback: Se o jornal bloqueou o robô, usa o resumo que já temos na memória
+        if (!articleText || articleText.length < 50) {
+            const cachedItem = MEMORY_DB_NEWS.find(n => n.link === targetUrl);
+            if (cachedItem && cachedItem.description) {
+                articleText = "RESUMO DO FEED RSS: " + cachedItem.description;
+            } else {
+                return res.json({ summary: '<p>Este jornal bloqueou a leitura da inteligência artificial.</p>', cached: false });
+            }
+        }
 
-        const articleText = article.textContent.trim();
         let summaryResult = '';
 
         if (ai) {
-            const prompt = `Resuma os fatos principais desta notícia em tópicos curtos HTML (<ul><li>). Não use parágrafos. Texto: ${articleText}`;
-            const aiResponse = await ai.models.generateContent({ model: 'gemini-2.5-flash', contents: prompt });
+            const prompt = `Resuma os fatos principais desta notícia em tópicos curtos HTML (<ul><li>). Não use parágrafos nem markdown fora do HTML. Texto: ${articleText}`;
+            // Correção crucial: gemini-1.5-flash é o modelo estável garantido.
+            const aiResponse = await ai.models.generateContent({ model: 'gemini-1.5-flash', contents: prompt });
             summaryResult = aiResponse.text.replace(/```html|```/g, '').trim();
         } else {
-            summaryResult = `<ul><li>A IA não está configurada.</li></ul>`;
+            summaryResult = `<ul><li>A IA não está configurada (Falta GEMINI_API_KEY). Texto bruto: ${articleText.substring(0, 100)}...</li></ul>`;
         }
 
         MEMORY_DB_SUMMARIES[targetUrl] = summaryResult;
         res.json({ summary: summaryResult, cached: false });
 
     } catch (error) {
-        res.status(500).json({ error: 'Erro ao resumir.' });
+        console.error('Erro na IA:', error);
+        // Retorna o erro DENTRO do summary para o usuário ver o que aconteceu na tela
+        res.json({ summary: `<p style="color:#ef4444; font-size: 0.9rem;"><strong>Erro Interno:</strong> ${error.message}</p>`, cached: false });
     }
 });
 
