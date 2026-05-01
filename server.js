@@ -150,7 +150,13 @@ async function refreshNewsCache() {
         console.log("Atualizando cache de notícias em background...");
         const feedPromises = FEEDS.map(async (feed) => {
             try {
-                const parsedFeed = await parser.parseURL(feed.url);
+                // Baixa o XML manualmente com Timeout estrito para evitar que o Render trave
+                const response = await axios.get(feed.url, {
+                    timeout: 4000,
+                    headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+                });
+                const parsedFeed = await parser.parseString(response.data);
+                
                 return parsedFeed.items.slice(0, 6).map(item => {
                     let cleanDesc = (item.description || '').replace(/<[^>]*>?/gm, '').trim();
                     if (cleanDesc.length > 150) cleanDesc = cleanDesc.substring(0, 150) + '...';
@@ -166,6 +172,7 @@ async function refreshNewsCache() {
                     };
                 });
             } catch (err) {
+                console.error(`Erro ao ler feed ${feed.sourceName}:`, err.message);
                 return [];
             }
         });
