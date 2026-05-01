@@ -5,7 +5,6 @@ const Parser = require('rss-parser');
 const cheerio = require('cheerio');
 const { JSDOM } = require('jsdom');
 const { Readability } = require('@mozilla/readability');
-const sqlite3 = require('sqlite3').verbose();
 require('dotenv').config();
 
 const app = express();
@@ -13,24 +12,6 @@ const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
-
-// Inicia Banco de Dados
-const db = new sqlite3.Database('./database.sqlite', (err) => {
-    if (err) {
-        console.error('Erro ao conectar ao SQLite:', err.message);
-    } else {
-        console.log('Conectado ao banco de dados SQLite.');
-        db.run(`CREATE TABLE IF NOT EXISTS summaries (
-            url TEXT PRIMARY KEY,
-            summary TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )`);
-        db.run(`CREATE TABLE IF NOT EXISTS feed_cache (
-            id INTEGER PRIMARY KEY,
-            data TEXT
-        )`);
-    }
-});
 
 const parser = new Parser({
     customFields: {
@@ -64,10 +45,7 @@ const FEEDS = [
     { url: 'https://vozdoentornogo.com.br/feed/', region: 'df', sourceName: 'Voz do Entorno GO' },
     { url: 'https://jornaldebrasilia.com.br/feed/', region: 'df', sourceName: 'Jornal de Brasília' },
     { url: 'https://portal6.com.br/feed/', region: 'go', sourceName: 'Portal 6' },
-    { url: 'https://www.jornalopcao.com.br/feed/', region: 'go', sourceName: 'Jornal Opção' },
-    { url: 'https://news.google.com/rss/search?q=%22%C3%81guas+Lindas+de+Goi%C3%A1s%22&hl=pt-BR&gl=BR&ceid=BR:pt-419', region: 'go', sourceName: 'Busca Tempo Real: Águas Lindas' },
-    { url: 'https://news.google.com/rss/search?q=%22bastidores+da+pol%C3%ADtica%22+DF+OR+Goi%C3%A1s&hl=pt-BR&gl=BR&ceid=BR:pt-419', region: 'df', sourceName: 'Busca: Bastidores Política' },
-    { url: 'https://news.google.com/rss/search?q=fofoca+famosos+bras%C3%ADlia+goi%C3%A2nia&hl=pt-BR&gl=BR&ceid=BR:pt-419', region: 'todos', sourceName: 'Busca: Fofoca Social' }
+    { url: 'https://www.jornalopcao.com.br/feed/', region: 'go', sourceName: 'Jornal Opção' }
 ];
 
 async function fetchCorreioBraziliense() {
@@ -78,32 +56,20 @@ async function fetchCorreioBraziliense() {
         });
         const $ = cheerio.load(response.data);
         const articles = [];
-        
         $('article').slice(0, 5).each((i, el) => {
             const title = $(el).find('h2, h3').text().trim() || $(el).find('a[title]').attr('title');
             let link = $(el).find('a').attr('href');
             let image = $(el).find('img').attr('src') || $(el).find('img').attr('data-src') || '';
-            
-            if (link && !link.startsWith('http')) {
-                link = 'https://www.correiobraziliense.com.br' + link;
-            }
-            
+            if (link && !link.startsWith('http')) link = 'https://www.correiobraziliense.com.br' + link;
             if (title && link) {
                 articles.push({
-                    title,
-                    link,
-                    description: 'Leia a matéria completa no site do Correio Braziliense.',
-                    pubDate: new Date().toISOString(),
-                    source: 'Correio Braziliense',
-                    region: 'df',
-                    image: image || null
+                    title, link, description: 'Leia a matéria completa no site do Correio Braziliense.',
+                    pubDate: new Date().toISOString(), source: 'Correio Braziliense', region: 'df', image: image || null
                 });
             }
         });
         return articles;
-    } catch (error) {
-        return [];
-    }
+    } catch (error) { return []; }
 }
 
 function emphasizeTitle(title) {
@@ -120,26 +86,22 @@ function emphasizeTitle(title) {
 function extractImageFromRSSItem(item) {
     if (item.mediaContent && item.mediaContent.$ && item.mediaContent.$.url) return item.mediaContent.$.url;
     if (item.enclosure && item.enclosure.url) return item.enclosure.url;
-    const htmlContent = item.contentEncoded || item.content || item.description || '';
-    const imgMatch = htmlContent.match(/<img[^>]+src="([^">]+)"/);
+    const imgMatch = (item.contentEncoded || item.content || item.description || '').match(/<img[^>]+src="([^">]+)"/);
     if (imgMatch && imgMatch[1]) return imgMatch[1];
     return null;
 }
 
 async function fetchRealImageFromUrl(url) {
     try {
-        const res = await axios.get(url, {
-            timeout: 3000,
-            headers: { 'User-Agent': 'Mozilla/5.0' }
-        });
+        const res = await axios.get(url, { timeout: 3000, headers: { 'User-Agent': 'Mozilla/5.0' } });
         const $ = cheerio.load(res.data);
         return $('meta[property="og:image"]').attr('content') || $('meta[name="twitter:image"]').attr('content') || null;
-    } catch (e) {
-        return null;
-    }
+    } catch (e) { return null; }
 }
 
-let cachedNews = [];
+// Bando de Dados em Memória (Failsafe para Render)
+let MEMORY_DB_NEWS = [];
+let MEMORY_DB_SUMMARIES = {};
 let isFetching = false;
 const imageCache = new Map();
 
@@ -147,49 +109,34 @@ async function refreshNewsCache() {
     if (isFetching) return;
     isFetching = true;
     try {
-        console.log("Atualizando cache de notícias em background...");
+        console.log("Buscando feeds XML...");
         const feedPromises = FEEDS.map(async (feed) => {
             try {
-                // Baixa o XML manualmente com Timeout estrito para evitar que o Render trave
-                const response = await axios.get(feed.url, {
-                    timeout: 4000,
-                    headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
-                });
+                const response = await axios.get(feed.url, { timeout: 4000, headers: { 'User-Agent': 'Mozilla/5.0' } });
                 const parsedFeed = await parser.parseString(response.data);
-                
                 return parsedFeed.items.slice(0, 6).map(item => {
                     let cleanDesc = (item.description || '').replace(/<[^>]*>?/gm, '').trim();
                     if (cleanDesc.length > 150) cleanDesc = cleanDesc.substring(0, 150) + '...';
-                    
                     return {
-                        title: emphasizeTitle(item.title),
-                        link: item.link,
-                        description: cleanDesc,
+                        title: emphasizeTitle(item.title), link: item.link, description: cleanDesc,
                         pubDate: new Date(item.pubDate || item.isoDate).toISOString(),
-                        source: feed.sourceName,
-                        region: feed.region,
-                        image: extractImageFromRSSItem(item)
+                        source: feed.sourceName, region: feed.region, image: extractImageFromRSSItem(item)
                     };
                 });
-            } catch (err) {
-                console.error(`Erro ao ler feed ${feed.sourceName}:`, err.message);
-                return [];
-            }
+            } catch (err) { return []; }
         });
 
         feedPromises.push(fetchCorreioBraziliense().then(items => items.map(i => ({...i, title: emphasizeTitle(i.title)}))));
 
         const results = await Promise.all(feedPromises);
-        cachedNews = results.flat().sort((a, b) => new Date(b.pubDate) - new Date(a.pubDate)).slice(0, 50);
+        MEMORY_DB_NEWS = results.flat().sort((a, b) => new Date(b.pubDate) - new Date(a.pubDate)).slice(0, 50);
         
-        // Salva imediatamente a versão apenas em texto para destravar a tela
-        db.run("INSERT OR REPLACE INTO feed_cache (id, data) VALUES (1, ?)", [JSON.stringify(cachedNews)]);
-        console.log("Feeds básicos carregados. Iniciando raspagem de imagens em segundo plano...");
-        isFetching = false; // Libera logo a requisição
-        
-        // Raspa imagens devagar nos bastidores
+        console.log("Feeds carregados em memória. Iniciando busca de capas...");
+        isFetching = false;
+
+        // Raspagem de capas muito segura (uma por uma)
         setTimeout(async () => {
-            for (let news of cachedNews) {
+            for (let news of MEMORY_DB_NEWS) {
                 if (!news.image) {
                     if (imageCache.has(news.link)) {
                         news.image = imageCache.get(news.link);
@@ -200,44 +147,26 @@ async function refreshNewsCache() {
                     }
                 }
             }
-            db.run("INSERT OR REPLACE INTO feed_cache (id, data) VALUES (1, ?)", [JSON.stringify(cachedNews)]);
-            console.log("Todas as imagens foram baixadas e salvas no banco.");
-        }, 100);
+            console.log("Capas atualizadas em memória.");
+        }, 1000);
         
     } catch (error) {
-        console.error("Erro ao atualizar cache:", error.message);
         isFetching = false;
     }
 }
 
-// Carrega dados do banco de dados na inicialização
-db.get("SELECT data FROM feed_cache WHERE id = 1", (err, row) => {
-    if (row && row.data) {
-        cachedNews = JSON.parse(row.data);
-        console.log("Notícias carregadas do SQLite quase instantaneamente.");
-    }
-    // Dispara a busca atualizada
-    refreshNewsCache();
-});
-
-// Atualiza o cache a cada 5 minutos
+// Inicializa a primeira busca imediatamente
+refreshNewsCache();
 setInterval(refreshNewsCache, 5 * 60 * 1000);
 
 app.get('/api/news', async (req, res) => {
-    if (cachedNews.length > 0) {
-        return res.json({ status: 'ok', items: cachedNews });
-    } else {
-        // Se ainda não carregou do SQLite nem da internet, espera carregar a primeira vez
-        await refreshNewsCache();
-        return res.json({ status: 'ok', items: cachedNews });
+    // Se o cache em memória já tiver dados (mesmo sem imagem), envia imediatamente
+    if (MEMORY_DB_NEWS.length > 0) {
+        return res.json({ status: 'ok', items: MEMORY_DB_NEWS });
     }
-});
-
-const getCachedSummary = (url) => new Promise((resolve, reject) => {
-    db.get("SELECT summary FROM summaries WHERE url = ?", [url], (err, row) => {
-        if (err) reject(err);
-        resolve(row ? row.summary : null);
-    });
+    // Se não tiver nada, força uma busca rápida de 3 segundos e retorna
+    await refreshNewsCache();
+    return res.json({ status: 'ok', items: MEMORY_DB_NEWS });
 });
 
 app.get('/api/summarize', async (req, res) => {
@@ -245,48 +174,38 @@ app.get('/api/summarize', async (req, res) => {
     if (!targetUrl) return res.status(400).json({ error: 'Faltou o parâmetro url' });
 
     try {
-        const cachedSummary = await getCachedSummary(targetUrl);
-        if (cachedSummary) {
-            return res.json({ summary: cachedSummary, cached: true });
+        if (MEMORY_DB_SUMMARIES[targetUrl]) {
+            return res.json({ summary: MEMORY_DB_SUMMARIES[targetUrl], cached: true });
         }
 
-        const response = await axios.get(targetUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+        const response = await axios.get(targetUrl, { timeout: 8000, headers: { 'User-Agent': 'Mozilla/5.0' } });
         const dom = new JSDOM(response.data, { url: targetUrl });
         const reader = new Readability(dom.window.document);
         const article = reader.parse();
 
-        if (!article || !article.textContent) {
-            return res.status(500).json({ error: 'Não foi possível extrair o texto.' });
-        }
+        if (!article || !article.textContent) return res.status(500).json({ error: 'Falha ao ler o texto.' });
 
         const articleText = article.textContent.trim();
         let summaryResult = '';
 
         if (ai) {
-            const prompt = `Você é um assistente jornalista focado em produtividade. Resuma a seguinte reportagem focando nos pontos cruciais e fatos principais.
-Sua resposta OBRIGATORIAMENTE deve ser formatada em HTML usando as tags <ul> e <li>. Não escreva "Aqui está o resumo", nem use parágrafos <p>, retorne EXCLUSIVAMENTE uma lista de tópicos curtos (bullet points) com os fatos da matéria.
-Reportagem:
-${articleText}`;
-            
-            const aiResponse = await ai.models.generateContent({
-                model: 'gemini-2.5-flash',
-                contents: prompt,
-            });
-            summaryResult = aiResponse.text;
-            summaryResult = summaryResult.replace(/```html|```/g, '').trim();
+            const prompt = `Resuma os fatos principais desta notícia em tópicos curtos HTML (<ul><li>). Não use parágrafos. Texto: ${articleText}`;
+            const aiResponse = await ai.models.generateContent({ model: 'gemini-2.5-flash', contents: prompt });
+            summaryResult = aiResponse.text.replace(/```html|```/g, '').trim();
         } else {
-            summaryResult = `<ul><li>A IA não está configurada (Falta GEMINI_API_KEY).</li><li>Texto bruto extraído: ${articleText.substring(0, 200)}...</li></ul>`;
+            summaryResult = `<ul><li>A IA não está configurada.</li></ul>`;
         }
 
-        db.run("INSERT OR REPLACE INTO summaries (url, summary) VALUES (?, ?)", [targetUrl, summaryResult]);
+        MEMORY_DB_SUMMARIES[targetUrl] = summaryResult;
         res.json({ summary: summaryResult, cached: false });
 
     } catch (error) {
-        console.error('Erro /summarize:', error.message);
-        res.status(500).json({ error: 'Erro ao tentar ler e resumir.' });
+        res.status(500).json({ error: 'Erro ao resumir.' });
     }
 });
 
+app.get('/', (req, res) => res.send('Giro Metropolitano Backend OK - V3 (Memória Pura)'));
+
 app.listen(PORT, () => {
-    console.log(`Backend rodando na porta ${PORT} com caching ultra-rápido via SQLite.`);
+    console.log(`Servidor ultra-leve rodando na porta ${PORT}`);
 });
