@@ -173,28 +173,32 @@ async function refreshNewsCache() {
         feedPromises.push(fetchCorreioBraziliense().then(items => items.map(i => ({...i, title: emphasizeTitle(i.title)}))));
 
         const results = await Promise.all(feedPromises);
-        let allNews = results.flat().sort((a, b) => new Date(b.pubDate) - new Date(a.pubDate)).slice(0, 50);
+        cachedNews = results.flat().sort((a, b) => new Date(b.pubDate) - new Date(a.pubDate)).slice(0, 50);
         
-        cachedNews = [];
-        for (let news of allNews) {
-            if (!news.image) {
-                if (imageCache.has(news.link)) {
-                    news.image = imageCache.get(news.link);
-                } else {
-                    const realImg = await fetchRealImageFromUrl(news.link);
-                    news.image = realImg || 'https://images.unsplash.com/photo-1495020689067-958852a7765e?q=80&w=600&auto=format&fit=crop';
-                    if (realImg) imageCache.set(news.link, realImg);
+        // Salva imediatamente a versão apenas em texto para destravar a tela
+        db.run("INSERT OR REPLACE INTO feed_cache (id, data) VALUES (1, ?)", [JSON.stringify(cachedNews)]);
+        console.log("Feeds básicos carregados. Iniciando raspagem de imagens em segundo plano...");
+        isFetching = false; // Libera logo a requisição
+        
+        // Raspa imagens devagar nos bastidores
+        setTimeout(async () => {
+            for (let news of cachedNews) {
+                if (!news.image) {
+                    if (imageCache.has(news.link)) {
+                        news.image = imageCache.get(news.link);
+                    } else {
+                        const realImg = await fetchRealImageFromUrl(news.link);
+                        news.image = realImg || 'https://images.unsplash.com/photo-1495020689067-958852a7765e?q=80&w=600&auto=format&fit=crop';
+                        if (realImg) imageCache.set(news.link, realImg);
+                    }
                 }
             }
-            cachedNews.push(news);
-        }
+            db.run("INSERT OR REPLACE INTO feed_cache (id, data) VALUES (1, ?)", [JSON.stringify(cachedNews)]);
+            console.log("Todas as imagens foram baixadas e salvas no banco.");
+        }, 100);
         
-        // Salva o JSON no banco SQLite para carregamento instantâneo se o Render reiniciar
-        db.run("INSERT OR REPLACE INTO feed_cache (id, data) VALUES (1, ?)", [JSON.stringify(cachedNews)]);
-        console.log("Cache atualizado com sucesso!");
     } catch (error) {
         console.error("Erro ao atualizar cache:", error.message);
-    } finally {
         isFetching = false;
     }
 }
